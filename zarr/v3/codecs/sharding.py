@@ -41,7 +41,7 @@ from zarr.v3.metadata import (
     DataType,
     CodecMetadata,
     ShardingCodecIndexLocation,
-    ShardingLayout,
+    ShardingCodecChunkLayout,
 )
 from zarr.v3.store import StorePath
 
@@ -162,7 +162,7 @@ class _ShardProxy(Mapping):
 class _ShardBuilder(Mapping):
     buf: Dict[ChunkCoords, BytesLike]
     chunks_per_shard: ChunkCoords
-    sharding_layout: ShardingLayout
+    sharding_layout: ShardingCodecChunkLayout
 
     @classmethod
     def merge_with_morton_order(
@@ -171,7 +171,7 @@ class _ShardBuilder(Mapping):
         tombstones: Set[ChunkCoords],
         *shard_dicts: Mapping[ChunkCoords, BytesLike],
     ) -> _ShardBuilder:
-        obj = cls.create_empty(chunks_per_shard, sharding_layout=ShardingLayout.RANDOM)
+        obj = cls.create_empty(chunks_per_shard, sharding_layout=ShardingCodecChunkLayout.RANDOM)
         for chunk_coords in morton_order_iter(chunks_per_shard):
             if tombstones is not None and chunk_coords in tombstones:
                 continue
@@ -184,7 +184,7 @@ class _ShardBuilder(Mapping):
 
     @classmethod
     def create_empty(
-        cls, chunks_per_shard: ChunkCoords, sharding_layout: ShardingLayout
+        cls, chunks_per_shard: ChunkCoords, sharding_layout: ShardingCodecChunkLayout
     ) -> _ShardBuilder:
         obj = cls()
         obj.buf = {}
@@ -220,14 +220,14 @@ class _ShardBuilder(Mapping):
             0 if index_location == ShardingCodecIndexLocation.end else index_byte_length
         )
         i = global_chunk_byte_offset
-        if self.sharding_layout == ShardingLayout.RANDOM:
+        if self.sharding_layout == ShardingCodecChunkLayout.RANDOM:
             for chunk_coords, chunk_bytes in self.buf.items():
                 index.set_chunk_slice(chunk_coords, slice(i, i + len(chunk_bytes)))
                 i += len(chunk_bytes)
         elif self.sharding_layout.is_dense():
             order_iter = (
                 morton_order_iter(self.chunks_per_shard)
-                if self.sharding_layout == ShardingLayout.DENSE_MORTON
+                if self.sharding_layout == ShardingCodecChunkLayout.DENSE_MORTON
                 else c_order_iter(self.chunks_per_shard)
             )
             for chunk_coords in order_iter:
@@ -240,7 +240,7 @@ class _ShardBuilder(Mapping):
             assert all(len(chunk_bytes) == chunk_byte_length for chunk_bytes in self.buf.values())
             order_iter = (
                 morton_order_iter(self.chunks_per_shard)
-                if self.sharding_layout == ShardingLayout.FIXED_OFFSET_MORTON
+                if self.sharding_layout == ShardingCodecChunkLayout.FIXED_OFFSET_MORTON
                 else c_order_iter(self.chunks_per_shard)
             )
 
@@ -281,7 +281,7 @@ class ShardingCodec(
     codec_pipeline: CodecPipeline
     index_codec_pipeline: CodecPipeline
     chunks_per_shard: Tuple[int, ...]
-    sharding_layout: ShardingLayout
+    sharding_layout: ShardingCodecChunkLayout
 
     @classmethod
     def from_metadata(
@@ -321,7 +321,7 @@ class ShardingCodec(
 
         sharding_layout = array_metadata.runtime_configuration.sharding_layout
         if sharding_layout is None:
-            sharding_layout = ShardingLayout.DENSE_MORTON
+            sharding_layout = ShardingCodecChunkLayout.DENSE_MORTON
 
         index_codec_pipeline = CodecPipeline.from_metadata(
             codec_metadata.configuration.index_codecs,

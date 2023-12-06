@@ -14,7 +14,7 @@ from zarr.v3.indexing import morton_order_iter
 from zarr.v3.metadata import (
     CodecMetadata,
     ShardingCodecIndexLocation,
-    ShardingLayout,
+    ShardingCodecChunkLayout,
     runtime_configuration,
 )
 
@@ -51,9 +51,7 @@ def sample_data() -> np.ndarray:
     return np.arange(0, 128 * 128 * 128, dtype="uint16").reshape((128, 128, 128), order="F")
 
 
-@pytest.mark.parametrize(
-    "index_location", [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end]
-)
+@pytest.mark.parametrize("index_location", list(ShardingCodecIndexLocation))
 def test_sharding(
     store: Store, sample_data: np.ndarray, index_location: ShardingCodecIndexLocation
 ):
@@ -83,24 +81,13 @@ def test_sharding(
     assert np.array_equal(sample_data, read_data)
 
 
-@pytest.mark.parametrize(
-    "index_location", [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end]
-)
-@pytest.mark.parametrize(
-    "sharding_layout",
-    [
-        ShardingLayout.RANDOM,
-        ShardingLayout.DENSE_C,
-        ShardingLayout.DENSE_MORTON,
-        ShardingLayout.FIXED_OFFSET_C,
-        ShardingLayout.FIXED_OFFSET_MORTON,
-    ],
-)
+@pytest.mark.parametrize("index_location", list(ShardingCodecIndexLocation))
+@pytest.mark.parametrize("sharding_layout", list(ShardingCodecChunkLayout))
 def test_sharding_partial(
     store: Store,
     sample_data: np.ndarray,
     index_location: ShardingCodecIndexLocation,
-    sharding_layout: ShardingLayout,
+    sharding_layout: ShardingCodecChunkLayout,
 ):
     inner_codecs: List[CodecMetadata] = [
         codecs.transpose_codec("F", sample_data.ndim),
@@ -137,24 +124,13 @@ def test_sharding_partial(
     assert np.array_equal(sample_data, read_data)
 
 
-@pytest.mark.parametrize(
-    "index_location", [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end]
-)
-@pytest.mark.parametrize(
-    "sharding_layout",
-    [
-        ShardingLayout.RANDOM,
-        ShardingLayout.DENSE_C,
-        ShardingLayout.DENSE_MORTON,
-        ShardingLayout.FIXED_OFFSET_C,
-        ShardingLayout.FIXED_OFFSET_MORTON,
-    ],
-)
+@pytest.mark.parametrize("index_location", list(ShardingCodecIndexLocation))
+@pytest.mark.parametrize("sharding_layout", list(ShardingCodecChunkLayout))
 def test_sharding_partial_read(
     store: Store,
     sample_data: np.ndarray,
     index_location: ShardingCodecIndexLocation,
-    sharding_layout: ShardingLayout,
+    sharding_layout: ShardingCodecChunkLayout,
 ):
     inner_codecs: List[CodecMetadata] = [
         codecs.transpose_codec("F", sample_data.ndim),
@@ -185,24 +161,13 @@ def test_sharding_partial_read(
     assert np.all(read_data == 1)
 
 
-@pytest.mark.parametrize(
-    "index_location", [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end]
-)
-@pytest.mark.parametrize(
-    "sharding_layout",
-    [
-        ShardingLayout.RANDOM,
-        ShardingLayout.DENSE_C,
-        ShardingLayout.DENSE_MORTON,
-        ShardingLayout.FIXED_OFFSET_C,
-        ShardingLayout.FIXED_OFFSET_MORTON,
-    ],
-)
+@pytest.mark.parametrize("index_location", list(ShardingCodecIndexLocation))
+@pytest.mark.parametrize("sharding_layout", list(ShardingCodecChunkLayout))
 def test_sharding_partial_overwrite(
     store: Store,
     sample_data: np.ndarray,
     index_location: ShardingCodecIndexLocation,
-    sharding_layout: ShardingLayout,
+    sharding_layout: ShardingCodecChunkLayout,
 ):
     data = sample_data[:10, :10, :10]
 
@@ -244,28 +209,19 @@ def test_sharding_partial_overwrite(
 
 @pytest.mark.parametrize(
     "outer_index_location",
-    [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end],
+    list(ShardingCodecIndexLocation),
 )
 @pytest.mark.parametrize(
     "inner_index_location",
-    [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end],
+    list(ShardingCodecIndexLocation),
 )
-@pytest.mark.parametrize(
-    "sharding_layout",
-    [
-        ShardingLayout.RANDOM,
-        ShardingLayout.DENSE_C,
-        ShardingLayout.DENSE_MORTON,
-        ShardingLayout.FIXED_OFFSET_C,
-        ShardingLayout.FIXED_OFFSET_MORTON,
-    ],
-)
+@pytest.mark.parametrize("sharding_layout", list(ShardingCodecChunkLayout))
 def test_nested_sharding(
     store: Store,
     sample_data: np.ndarray,
     outer_index_location: ShardingCodecIndexLocation,
     inner_index_location: ShardingCodecIndexLocation,
-    sharding_layout: ShardingLayout,
+    sharding_layout: ShardingCodecChunkLayout,
 ):
     a = Array.create(
         store / "l4_sample" / "color" / "1",

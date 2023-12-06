@@ -11,7 +11,7 @@ from attr import asdict, field, frozen
 from zarr.v3.common import ChunkCoords, make_cattr
 
 
-class ShardingLayout(Enum):
+class ShardingCodecChunkLayout(Enum):
     FIXED_OFFSET_MORTON = "FIXED_OFFSET_MORTON"
     FIXED_OFFSET_C = "FIXED_OFFSET_C"
     DENSE_MORTON = "DENSE_MORTON"
@@ -30,13 +30,13 @@ class RuntimeConfiguration:
     order: Literal["C", "F"] = "C"
     concurrency: Optional[int] = None
     asyncio_loop: Optional[AbstractEventLoop] = None
-    sharding_layout: Optional[ShardingLayout] = None
+    sharding_layout: Optional[ShardingCodecChunkLayout] = None
 
 
 def runtime_configuration(
     order: Literal["C", "F"] = "C",
     concurrency: Optional[int] = None,
-    sharding_layout: Optional[ShardingLayout] = None,
+    sharding_layout: Optional[ShardingCodecChunkLayout] = None,
 ) -> RuntimeConfiguration:
     return RuntimeConfiguration(
         order=order, concurrency=concurrency, sharding_layout=sharding_layout
