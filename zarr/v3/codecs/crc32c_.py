@@ -48,7 +48,14 @@ class Crc32cCodec(BytesBytesCodec):
         crc32_bytes = chunk_bytes[-4:]
         inner_bytes = chunk_bytes[:-4]
 
-        assert np.uint32(crc32c(inner_bytes)).tobytes() == bytes(crc32_bytes)
+        computed_checksum = np.uint32(crc32c(inner_bytes))
+        computed_checksum_bytes = computed_checksum.tobytes()
+        stored_checksum_bytes = bytes(crc32_bytes)
+        stored_checksum = np.frombuffer(stored_checksum_bytes, dtype=np.uint32)[0]
+
+        assert (
+            computed_checksum_bytes == stored_checksum_bytes
+        ), f"Crc32c mismatch {computed_checksum} != {stored_checksum}"
         return inner_bytes
 
     async def encode(

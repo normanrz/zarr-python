@@ -153,6 +153,15 @@ class CodecPipeline:
     def compute_encoded_size(self, byte_length: int) -> int:
         return reduce(lambda acc, codec: codec.compute_encoded_size(acc), self.codecs, byte_length)
 
+    def compute_encoded_size_from_array(self, array: np.ndarray) -> int:
+        return self.compute_encoded_size(array.size * array.dtype.itemsize)
+
+    def is_fixed_size(self) -> bool:
+        try:
+            return isinstance(self.compute_encoded_size(1), int)
+        except Exception:
+            return False
+
 
 def blosc_codec(
     typesize: int,

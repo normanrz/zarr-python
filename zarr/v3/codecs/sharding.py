@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from typing import (
-    Awaitable,
-    Callable,
+    Dict,
     Iterator,
     List,
     Literal,
@@ -42,6 +41,7 @@ from zarr.v3.metadata import (
     DataType,
     CodecMetadata,
     ShardingCodecIndexLocation,
+    ShardingLayout,
 )
 from zarr.v3.store import StorePath
 
@@ -159,9 +159,10 @@ class _ShardProxy(Mapping):
         return c_order_iter(self.index.offsets_and_lengths.shape[:-1])
 
 
-class _ShardBuilder(_ShardProxy):
-    buf: bytearray
-    index: _ShardIndex
+class _ShardBuilder(Mapping):
+    buf: Dict[ChunkCoords, BytesLike]
+    chunks_per_shard: ChunkCoords
+    sharding_layout: ShardingLayout
 
     @classmethod
     def merge_with_morton_order(
@@ -170,7 +171,7 @@ class _ShardBuilder(_ShardProxy):
         tombstones: Set[ChunkCoords],
         *shard_dicts: Mapping[ChunkCoords, BytesLike],
     ) -> _ShardBuilder:
-        obj = cls.create_empty(chunks_per_shard)
+        obj = cls.create_empty(chunks_per_shard, sharding_layout=ShardingLayout.RANDOM)
         for chunk_coords in morton_order_iter(chunks_per_shard):
             if tombstones is not None and chunk_coords in tombstones:
                 continue
@@ -182,33 +183,93 @@ class _ShardBuilder(_ShardProxy):
         return obj
 
     @classmethod
-    def create_empty(cls, chunks_per_shard: ChunkCoords) -> _ShardBuilder:
+    def create_empty(
+        cls, chunks_per_shard: ChunkCoords, sharding_layout: ShardingLayout
+    ) -> _ShardBuilder:
         obj = cls()
-        obj.buf = bytearray()
-        obj.index = _ShardIndex.create_empty(chunks_per_shard)
+        obj.buf = {}
+        obj.chunks_per_shard = chunks_per_shard
+        obj.sharding_layout = sharding_layout
         return obj
 
     def append(self, chunk_coords: ChunkCoords, value: BytesLike):
-        chunk_start = len(self.buf)
-        chunk_length = len(value)
-        self.buf.extend(value)
-        self.index.set_chunk_slice(chunk_coords, slice(chunk_start, chunk_start + chunk_length))
+        assert value is not None
+        self.buf[chunk_coords] = value
+
+    def __getitem__(self, chunk_coords: ChunkCoords) -> Optional[BytesLike]:
+        return self.buf.get(chunk_coords)
+
+    def __len__(self) -> int:
+        return len(self.buf)
+
+    def __iter__(self) -> Iterator[ChunkCoords]:
+        return self.buf.keys().__iter__()
 
     async def finalize(
-        self,
-        index_location: ShardingCodecIndexLocation,
-        index_encoder: Callable[[_ShardIndex], Awaitable[BytesLike]],
-    ) -> BytesLike:
-        index_bytes = await index_encoder(self.index)
-        if index_location == ShardingCodecIndexLocation.start:
-            self.index.offsets_and_lengths[..., 0] += len(index_bytes)
-            index_bytes = await index_encoder(self.index)  # encode again with corrected offsets
-            out_buf = bytearray(index_bytes)
-            out_buf.extend(self.buf)
+        self, index_location: ShardingCodecIndexLocation, index_codec_pipeline: CodecPipeline
+    ) -> Optional[BytesLike]:
+        if len(self.buf) == 0:
+            return None
+
+        index = _ShardIndex.create_empty(self.chunks_per_shard)
+        index_byte_length = index_codec_pipeline.compute_encoded_size_from_array(
+            index.offsets_and_lengths
+        )
+
+        global_chunk_byte_offset = (
+            0 if index_location == ShardingCodecIndexLocation.end else index_byte_length
+        )
+        i = global_chunk_byte_offset
+        if self.sharding_layout == ShardingLayout.RANDOM:
+            for chunk_coords, chunk_bytes in self.buf.items():
+                index.set_chunk_slice(chunk_coords, slice(i, i + len(chunk_bytes)))
+                i += len(chunk_bytes)
+        elif self.sharding_layout.is_dense():
+            order_iter = (
+                morton_order_iter(self.chunks_per_shard)
+                if self.sharding_layout == ShardingLayout.DENSE_MORTON
+                else c_order_iter(self.chunks_per_shard)
+            )
+            for chunk_coords in order_iter:
+                chunk_bytes_maybe = self.buf.get(chunk_coords)
+                if chunk_bytes_maybe is not None:
+                    index.set_chunk_slice(chunk_coords, slice(i, i + len(chunk_bytes_maybe)))
+                    i += len(chunk_bytes_maybe)
+        elif self.sharding_layout.is_fixed_offset():
+            chunk_byte_length = len(next(iter(self.buf.values())))
+            assert all(len(chunk_bytes) == chunk_byte_length for chunk_bytes in self.buf.values())
+            order_iter = (
+                morton_order_iter(self.chunks_per_shard)
+                if self.sharding_layout == ShardingLayout.FIXED_OFFSET_MORTON
+                else c_order_iter(self.chunks_per_shard)
+            )
+
+            for chunk_coords in order_iter:
+                chunk_bytes_maybe = self.buf.get(chunk_coords)
+                if chunk_bytes_maybe is not None:
+                    index.set_chunk_slice(chunk_coords, slice(i, i + len(chunk_bytes_maybe)))
+                i += chunk_byte_length
         else:
-            out_buf = self.buf
-            out_buf.extend(index_bytes)
-        return out_buf
+            raise RuntimeError("unreachable")
+
+        if index_location == ShardingCodecIndexLocation.end:
+            i += index_byte_length
+
+        byte_buf = bytearray(i)
+
+        index_bytes = await index_codec_pipeline.encode(index.offsets_and_lengths)
+        assert index_bytes is not None
+        assert len(index_bytes) == index_byte_length
+        if index_location == ShardingCodecIndexLocation.start:
+            byte_buf[:index_byte_length] = index_bytes
+        else:
+            byte_buf[-index_byte_length:] = index_bytes
+        for chunk_coords, chunk_bytes in self.buf.items():
+            chunk_slice = index.get_chunk_slice(chunk_coords)
+            assert chunk_slice is not None
+            chunk_byte_start, chunk_byte_end = chunk_slice
+            byte_buf[chunk_byte_start:chunk_byte_end] = chunk_bytes
+        return byte_buf
 
 
 @frozen
@@ -220,6 +281,7 @@ class ShardingCodec(
     codec_pipeline: CodecPipeline
     index_codec_pipeline: CodecPipeline
     chunks_per_shard: Tuple[int, ...]
+    sharding_layout: ShardingLayout
 
     @classmethod
     def from_metadata(
@@ -247,6 +309,20 @@ class ShardingCodec(
         codec_pipeline = CodecPipeline.from_metadata(
             codec_metadata.configuration.codecs, shard_metadata
         )
+
+        if (
+            array_metadata.runtime_configuration.sharding_layout is not None
+            and array_metadata.runtime_configuration.sharding_layout.is_fixed_offset()
+        ):
+            assert codec_pipeline.is_fixed_size(), (
+                "Fixed offset layouts only work with codecs that "
+                + "produce fixed-sized encoded representation."
+            )
+
+        sharding_layout = array_metadata.runtime_configuration.sharding_layout
+        if sharding_layout is None:
+            sharding_layout = ShardingLayout.DENSE_MORTON
+
         index_codec_pipeline = CodecPipeline.from_metadata(
             codec_metadata.configuration.index_codecs,
             CoreArrayMetadata(
@@ -257,12 +333,14 @@ class ShardingCodec(
                 runtime_configuration=array_metadata.runtime_configuration,
             ),
         )
+        assert index_codec_pipeline.is_fixed_size()
         return cls(
             array_metadata=array_metadata,
             configuration=codec_metadata.configuration,
             codec_pipeline=codec_pipeline,
             index_codec_pipeline=index_codec_pipeline,
             chunks_per_shard=chunks_per_shard,
+            sharding_layout=sharding_layout,
         )
 
     @classmethod
@@ -407,12 +485,14 @@ class ShardingCodec(
             )
         )
 
+        shard_builder = _ShardBuilder.create_empty(self.chunks_per_shard, self.sharding_layout)
+
         async def _write_chunk(
             shard_array: np.ndarray,
             chunk_coords: ChunkCoords,
             chunk_selection: SliceSelection,
             out_selection: SliceSelection,
-        ) -> Tuple[ChunkCoords, Optional[BytesLike]]:
+        ) -> None:
             if is_total_slice(chunk_selection, chunk_shape):
                 chunk_array = shard_array[out_selection]
             else:
@@ -424,14 +504,12 @@ class ShardingCodec(
                 chunk_array.fill(self.array_metadata.fill_value)
                 chunk_array[chunk_selection] = shard_array[out_selection]
             if not np.array_equiv(chunk_array, self.array_metadata.fill_value):
-                return (
-                    chunk_coords,
-                    await self.codec_pipeline.encode(chunk_array),
-                )
-            return (chunk_coords, None)
+                chunk_bytes = await self.codec_pipeline.encode(chunk_array)
+                if chunk_bytes is not None:
+                    shard_builder.append(chunk_coords, chunk_bytes)
 
         # assembling and encoding chunks within the shard
-        encoded_chunks: List[Tuple[ChunkCoords, Optional[BytesLike]]] = await concurrent_map(
+        await concurrent_map(
             [
                 (shard_array, chunk_coords, chunk_selection, out_selection)
                 for chunk_coords, chunk_selection, out_selection in indexer
@@ -439,16 +517,12 @@ class ShardingCodec(
             _write_chunk,
             self.array_metadata.runtime_configuration.concurrency,
         )
-        if len(encoded_chunks) == 0:
+
+        if len(shard_builder.buf) == 0:
             return None
 
-        shard_builder = _ShardBuilder.create_empty(self.chunks_per_shard)
-        for chunk_coords, chunk_bytes in encoded_chunks:
-            if chunk_bytes is not None:
-                shard_builder.append(chunk_coords, chunk_bytes)
-
         return await shard_builder.finalize(
-            self.configuration.index_location, self._encode_shard_index
+            self.configuration.index_location, self.index_codec_pipeline
         )
 
     async def encode_partial(
@@ -464,7 +538,7 @@ class ShardingCodec(
         old_shard_dict = (
             await self._load_full_shard_maybe(store_path)
         ) or _ShardProxy.create_empty(self.chunks_per_shard)
-        new_shard_builder = _ShardBuilder.create_empty(self.chunks_per_shard)
+        new_shard_builder = _ShardBuilder.create_empty(self.chunks_per_shard, self.sharding_layout)
         tombstones: Set[ChunkCoords] = set()
 
         indexer = list(
@@ -532,15 +606,14 @@ class ShardingCodec(
             self.chunks_per_shard, tombstones, new_shard_builder, old_shard_dict
         )
 
-        if shard_builder.index.is_all_empty():
+        shard_bytes = await shard_builder.finalize(
+            self.configuration.index_location,
+            self.index_codec_pipeline,
+        )
+        if shard_bytes is None:
             await store_path.delete_async()
         else:
-            await store_path.set_async(
-                await shard_builder.finalize(
-                    self.configuration.index_location,
-                    self._encode_shard_index,
-                )
-            )
+            await store_path.set_async(shard_bytes)
 
     def _is_total_shard(self, all_chunk_coords: Set[ChunkCoords]) -> bool:
         return len(all_chunk_coords) == product(self.chunks_per_shard) and all(

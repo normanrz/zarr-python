@@ -11,7 +11,12 @@ from zarr.v3 import codecs
 from zarr.v3.array import Array, AsyncArray
 from zarr.v3.common import Selection
 from zarr.v3.indexing import morton_order_iter
-from zarr.v3.metadata import CodecMetadata, ShardingCodecIndexLocation, runtime_configuration
+from zarr.v3.metadata import (
+    CodecMetadata,
+    ShardingCodecIndexLocation,
+    ShardingLayout,
+    runtime_configuration,
+)
 
 from zarr.v3.store import MemoryStore, Store
 
@@ -81,9 +86,31 @@ def test_sharding(
 @pytest.mark.parametrize(
     "index_location", [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end]
 )
+@pytest.mark.parametrize(
+    "sharding_layout",
+    [
+        ShardingLayout.RANDOM,
+        ShardingLayout.DENSE_C,
+        ShardingLayout.DENSE_MORTON,
+        ShardingLayout.FIXED_OFFSET_C,
+        ShardingLayout.FIXED_OFFSET_MORTON,
+    ],
+)
 def test_sharding_partial(
-    store: Store, sample_data: np.ndarray, index_location: ShardingCodecIndexLocation
+    store: Store,
+    sample_data: np.ndarray,
+    index_location: ShardingCodecIndexLocation,
+    sharding_layout: ShardingLayout,
 ):
+    inner_codecs: List[CodecMetadata] = [
+        codecs.transpose_codec("F", sample_data.ndim),
+        codecs.bytes_codec(),
+        codecs.blosc_codec(typesize=sample_data.dtype.itemsize, cname="lz4"),
+    ]
+
+    if sharding_layout.is_fixed_offset():
+        inner_codecs.pop()
+
     a = Array.create(
         store / "sample",
         shape=tuple(a + 10 for a in sample_data.shape),
@@ -93,14 +120,11 @@ def test_sharding_partial(
         codecs=[
             codecs.sharding_codec(
                 (32, 32, 32),
-                [
-                    codecs.transpose_codec("F", sample_data.ndim),
-                    codecs.bytes_codec(),
-                    codecs.blosc_codec(typesize=sample_data.dtype.itemsize, cname="lz4"),
-                ],
+                inner_codecs,
                 index_location=index_location,
             )
         ],
+        runtime_configuration=runtime_configuration(sharding_layout=sharding_layout),
     )
 
     a[10:, 10:, 10:] = sample_data
@@ -116,9 +140,31 @@ def test_sharding_partial(
 @pytest.mark.parametrize(
     "index_location", [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end]
 )
+@pytest.mark.parametrize(
+    "sharding_layout",
+    [
+        ShardingLayout.RANDOM,
+        ShardingLayout.DENSE_C,
+        ShardingLayout.DENSE_MORTON,
+        ShardingLayout.FIXED_OFFSET_C,
+        ShardingLayout.FIXED_OFFSET_MORTON,
+    ],
+)
 def test_sharding_partial_read(
-    store: Store, sample_data: np.ndarray, index_location: ShardingCodecIndexLocation
+    store: Store,
+    sample_data: np.ndarray,
+    index_location: ShardingCodecIndexLocation,
+    sharding_layout: ShardingLayout,
 ):
+    inner_codecs: List[CodecMetadata] = [
+        codecs.transpose_codec("F", sample_data.ndim),
+        codecs.bytes_codec(),
+        codecs.blosc_codec(typesize=sample_data.dtype.itemsize, cname="lz4"),
+    ]
+
+    if sharding_layout.is_fixed_offset():
+        inner_codecs.pop()
+
     a = Array.create(
         store / "sample",
         shape=tuple(a + 10 for a in sample_data.shape),
@@ -128,14 +174,11 @@ def test_sharding_partial_read(
         codecs=[
             codecs.sharding_codec(
                 (32, 32, 32),
-                [
-                    codecs.transpose_codec("F", sample_data.ndim),
-                    codecs.bytes_codec(),
-                    codecs.blosc_codec(typesize=sample_data.dtype.itemsize, cname="lz4"),
-                ],
+                inner_codecs,
                 index_location=index_location,
             )
         ],
+        runtime_configuration=runtime_configuration(sharding_layout=sharding_layout),
     )
 
     read_data = a[0:10, 0:10, 0:10]
@@ -145,10 +188,32 @@ def test_sharding_partial_read(
 @pytest.mark.parametrize(
     "index_location", [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end]
 )
+@pytest.mark.parametrize(
+    "sharding_layout",
+    [
+        ShardingLayout.RANDOM,
+        ShardingLayout.DENSE_C,
+        ShardingLayout.DENSE_MORTON,
+        ShardingLayout.FIXED_OFFSET_C,
+        ShardingLayout.FIXED_OFFSET_MORTON,
+    ],
+)
 def test_sharding_partial_overwrite(
-    store: Store, sample_data: np.ndarray, index_location: ShardingCodecIndexLocation
+    store: Store,
+    sample_data: np.ndarray,
+    index_location: ShardingCodecIndexLocation,
+    sharding_layout: ShardingLayout,
 ):
     data = sample_data[:10, :10, :10]
+
+    inner_codecs: List[CodecMetadata] = [
+        codecs.transpose_codec("F", data.ndim),
+        codecs.bytes_codec(),
+        codecs.blosc_codec(typesize=data.dtype.itemsize, cname="lz4"),
+    ]
+
+    if sharding_layout.is_fixed_offset():
+        inner_codecs.pop()
 
     a = Array.create(
         store / "sample",
@@ -159,14 +224,11 @@ def test_sharding_partial_overwrite(
         codecs=[
             codecs.sharding_codec(
                 (32, 32, 32),
-                [
-                    codecs.transpose_codec("F", data.ndim),
-                    codecs.bytes_codec(),
-                    codecs.blosc_codec(typesize=data.dtype.itemsize, cname="lz4"),
-                ],
+                inner_codecs,
                 index_location=index_location,
             )
         ],
+        runtime_configuration=runtime_configuration(sharding_layout=sharding_layout),
     )
 
     a[:10, :10, :10] = data
@@ -188,11 +250,22 @@ def test_sharding_partial_overwrite(
     "inner_index_location",
     [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end],
 )
+@pytest.mark.parametrize(
+    "sharding_layout",
+    [
+        ShardingLayout.RANDOM,
+        ShardingLayout.DENSE_C,
+        ShardingLayout.DENSE_MORTON,
+        ShardingLayout.FIXED_OFFSET_C,
+        ShardingLayout.FIXED_OFFSET_MORTON,
+    ],
+)
 def test_nested_sharding(
     store: Store,
     sample_data: np.ndarray,
     outer_index_location: ShardingCodecIndexLocation,
     inner_index_location: ShardingCodecIndexLocation,
+    sharding_layout: ShardingLayout,
 ):
     a = Array.create(
         store / "l4_sample" / "color" / "1",
@@ -207,6 +280,7 @@ def test_nested_sharding(
                 index_location=outer_index_location,
             )
         ],
+        runtime_configuration=runtime_configuration(sharding_layout=sharding_layout),
     )
 
     a[:, :, :] = sample_data
