@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Iterator, List, Literal, Optional
+from typing import Iterator, List, Literal, Optional, Tuple
 from attr import frozen
 
 import numpy as np
@@ -9,8 +9,8 @@ import pytest
 import zarr
 from zarr.v3 import codecs
 from zarr.v3.array import Array, AsyncArray
-from zarr.v3.common import Selection
-from zarr.v3.indexing import morton_order_iter
+from zarr.v3.common import ChunkCoords, Selection
+from zarr.v3.indexing import c_order_iter, morton_order_iter
 from zarr.v3.metadata import (
     CodecMetadata,
     ShardingCodecIndexLocation,
@@ -19,6 +19,9 @@ from zarr.v3.metadata import (
 )
 
 from zarr.v3.store import MemoryStore, Store
+
+
+MAX_UINT64 = 2**64 - 1
 
 
 @frozen
@@ -122,6 +125,132 @@ def test_sharding_partial(
     read_data = a[10:, 10:, 10:]
     assert sample_data.shape == read_data.shape
     assert np.array_equal(sample_data, read_data)
+
+
+@pytest.mark.parametrize("sharding_layout", list(ShardingCodecChunkLayout))
+@pytest.mark.asyncio
+async def test_sharding_layout(
+    store: Store,
+    sample_data: np.ndarray,
+    sharding_layout: ShardingCodecChunkLayout,
+):
+    inner_codecs: List[CodecMetadata] = [
+        codecs.transpose_codec("F", sample_data.ndim),
+        codecs.bytes_codec(),
+        codecs.blosc_codec(typesize=sample_data.dtype.itemsize, cname="lz4"),
+    ]
+
+    if sharding_layout.is_fixed_offset():
+        inner_codecs.pop()
+
+    a = await AsyncArray.create(
+        store / "sample",
+        shape=sample_data.shape,
+        chunk_shape=(64, 64, 64),
+        dtype=sample_data.dtype,
+        fill_value=0,
+        codecs=[
+            codecs.sharding_codec(
+                (32, 32, 32),
+                inner_codecs,
+                index_location=ShardingCodecIndexLocation.start,
+                index_codecs=[codecs.bytes_codec()],
+            )
+        ],
+        runtime_configuration=runtime_configuration(sharding_layout=sharding_layout),
+    )
+
+    await _AsyncArrayProxy(a)[:, :, :].set(sample_data)
+
+    index_bytes = await (store / "sample" / "c" / "0" / "0" / "0").get_async((0, 16 * 8))
+    index = np.frombuffer(index_bytes, dtype=np.uint64).reshape((2, 2, 2, 2))
+
+    if sharding_layout.is_dense():
+        sorted_index: List[Tuple[int, int]] = sorted(
+            index.reshape((-1, 2)).tolist(), key=lambda a: a[0]
+        )
+        i = 16 * 8
+        for chunk_byte_start, chunk_byte_length in sorted_index:
+            if chunk_byte_start != MAX_UINT64:
+                assert i == chunk_byte_start
+                i += chunk_byte_length
+
+        order_iter: Optional[Iterator[ChunkCoords]] = None
+        if sharding_layout == ShardingCodecChunkLayout.DENSE_C:
+            order_iter = c_order_iter((2, 2, 2))
+        elif sharding_layout == ShardingCodecChunkLayout.DENSE_MORTON:
+            order_iter = morton_order_iter((2, 2, 2))
+
+        if order_iter is not None:
+            i = 16 * 8
+            for chunk_coords in order_iter:
+                if index[chunk_coords][0] != MAX_UINT64:
+                    assert index[chunk_coords][0] == i
+                    i += index[chunk_coords][1]
+
+    if sharding_layout.is_fixed_offset():
+        chunk_byte_length = 32**3 * 2
+        order_iter = (
+            morton_order_iter((2, 2, 2))
+            if sharding_layout == ShardingCodecChunkLayout.FIXED_OFFSET_MORTON
+            else c_order_iter((2, 2, 2))
+        )
+        for i, chunk_coords in enumerate(order_iter):
+            if index[chunk_coords][0] != MAX_UINT64:
+                assert index[chunk_coords][0] == (16 * 8) + i * chunk_byte_length
+                assert index[chunk_coords][1] == chunk_byte_length
+
+
+@pytest.mark.parametrize("index_location", list(ShardingCodecIndexLocation))
+@pytest.mark.asyncio
+async def test_sharding_index_location(
+    store: Store,
+    sample_data: np.ndarray,
+    index_location: ShardingCodecIndexLocation,
+):
+    inner_codecs: List[CodecMetadata] = [
+        codecs.transpose_codec("F", sample_data.ndim),
+        codecs.bytes_codec(),
+    ]
+
+    a = await AsyncArray.create(
+        store / "sample",
+        shape=sample_data.shape,
+        chunk_shape=(64, 64, 64),
+        dtype=sample_data.dtype,
+        fill_value=0,
+        codecs=[
+            codecs.sharding_codec(
+                (32, 32, 32),
+                inner_codecs,
+                index_location=index_location,
+            )
+        ],
+        runtime_configuration=runtime_configuration(
+            sharding_layout=ShardingCodecChunkLayout.DENSE_C
+        ),
+    )
+
+    await _AsyncArrayProxy(a)[:, :, :].set(sample_data)
+
+    index_byte_length = 16 * 8 + 4
+
+    if index_location == ShardingCodecIndexLocation.start:
+        index_bytes = await (store / "sample" / "c" / "0" / "0" / "0").get_async(
+            (0, index_byte_length)
+        )
+    elif index_location == ShardingCodecIndexLocation.end:
+        index_bytes = await (store / "sample" / "c" / "0" / "0" / "0").get_async(
+            (-(index_byte_length), None)
+        )
+    assert index_bytes is not None
+    index = np.frombuffer(index_bytes[:-4], dtype=np.uint64).reshape((2, 2, 2, 2))
+
+    chunk_byte_length = 32**3 * 2
+    global_offset = 0 if index_location == ShardingCodecIndexLocation.end else index_byte_length
+    for i, chunk_coords in enumerate(c_order_iter((2, 2, 2))):
+        assert index[chunk_coords][0] == global_offset + i * chunk_byte_length
+        assert index[chunk_coords][1] == chunk_byte_length
 
 
 @pytest.mark.parametrize("index_location", list(ShardingCodecIndexLocation))

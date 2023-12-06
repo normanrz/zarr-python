@@ -16,13 +16,13 @@ class ShardingCodecChunkLayout(Enum):
     FIXED_OFFSET_C = "FIXED_OFFSET_C"
     DENSE_MORTON = "DENSE_MORTON"
     DENSE_C = "DENSE_C"
-    RANDOM = "RANDOM"
+    DENSE_UNORDERED = "DENSE_UNORDERED"
 
     def is_fixed_offset(self) -> bool:
         return self in (type(self).FIXED_OFFSET_C, type(self).FIXED_OFFSET_MORTON)
 
     def is_dense(self) -> bool:
-        return self in (type(self).DENSE_C, type(self).DENSE_MORTON)
+        return self in (type(self).DENSE_C, type(self).DENSE_MORTON, type(self).DENSE_UNORDERED)
 
 
 @frozen

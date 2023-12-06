@@ -171,7 +171,9 @@ class _ShardBuilder(Mapping):
         tombstones: Set[ChunkCoords],
         *shard_dicts: Mapping[ChunkCoords, BytesLike],
     ) -> _ShardBuilder:
-        obj = cls.create_empty(chunks_per_shard, sharding_layout=ShardingCodecChunkLayout.RANDOM)
+        obj = cls.create_empty(
+            chunks_per_shard, sharding_layout=ShardingCodecChunkLayout.DENSE_UNORDERED
+        )
         for chunk_coords in morton_order_iter(chunks_per_shard):
             if tombstones is not None and chunk_coords in tombstones:
                 continue
@@ -220,21 +222,33 @@ class _ShardBuilder(Mapping):
             0 if index_location == ShardingCodecIndexLocation.end else index_byte_length
         )
         i = global_chunk_byte_offset
-        if self.sharding_layout == ShardingCodecChunkLayout.RANDOM:
-            for chunk_coords, chunk_bytes in self.buf.items():
+        if self.sharding_layout.is_dense():
+            if self.sharding_layout == ShardingCodecChunkLayout.DENSE_UNORDERED:
+                index_iter = (
+                    (chunk_coords, chunk_bytes) for chunk_coords, chunk_bytes in self.buf.items()
+                )
+            elif self.sharding_layout == ShardingCodecChunkLayout.DENSE_C:
+                index_iter = (
+                    (chunk_coords, chunk_bytes)
+                    for chunk_coords, chunk_bytes in (
+                        (chunk_coords, self.buf.get(chunk_coords))
+                        for chunk_coords in c_order_iter(self.chunks_per_shard)
+                    )
+                    if chunk_bytes is not None
+                )
+            elif self.sharding_layout == ShardingCodecChunkLayout.DENSE_MORTON:
+                index_iter = (
+                    (chunk_coords, chunk_bytes)
+                    for chunk_coords, chunk_bytes in (
+                        (chunk_coords, self.buf.get(chunk_coords))
+                        for chunk_coords in morton_order_iter(self.chunks_per_shard)
+                    )
+                    if chunk_bytes is not None
+                )
+
+            for chunk_coords, chunk_bytes in index_iter:
                 index.set_chunk_slice(chunk_coords, slice(i, i + len(chunk_bytes)))
                 i += len(chunk_bytes)
-        elif self.sharding_layout.is_dense():
-            order_iter = (
-                morton_order_iter(self.chunks_per_shard)
-                if self.sharding_layout == ShardingCodecChunkLayout.DENSE_MORTON
-                else c_order_iter(self.chunks_per_shard)
-            )
-            for chunk_coords in order_iter:
-                chunk_bytes_maybe = self.buf.get(chunk_coords)
-                if chunk_bytes_maybe is not None:
-                    index.set_chunk_slice(chunk_coords, slice(i, i + len(chunk_bytes_maybe)))
-                    i += len(chunk_bytes_maybe)
         elif self.sharding_layout.is_fixed_offset():
             chunk_byte_length = len(next(iter(self.buf.values())))
             assert all(len(chunk_bytes) == chunk_byte_length for chunk_bytes in self.buf.values())
