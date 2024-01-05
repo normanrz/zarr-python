@@ -47,6 +47,11 @@ from zarr.v3.store import StorePath
 
 MAX_UINT_64 = 2**64 - 1
 
+# TODO
+# * DENSE_UNORDERED -> write out directly
+# * FIXED_OFFSET -> write out directly?
+# * FIXED_OFFSET + partial -> preflight checks and write out directly
+
 
 @frozen
 class ShardingCodecConfigurationMetadata:
