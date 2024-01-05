@@ -9,10 +9,10 @@ from zarr.v3.common import Selection
 
 
 class BaseArray(ABC):
-    @abstractproperty
-    def store_path(self) -> str:  # TODO: rename to `path`?
-        """Path to this array in the underlying store."""
-        ...
+    # @abstractproperty
+    # def store_path(self) -> str:  # TODO: rename to `path`?
+    #     """Path to this array in the underlying store."""
+    #     ...
 
     @abstractproperty
     def dtype(self) -> np.dtype:

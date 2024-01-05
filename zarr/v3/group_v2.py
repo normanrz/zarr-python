@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict, dataclass, replace
 import json
 from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Union
 
-from attr import asdict, evolve, frozen
-
 from zarr.v3.array_v2 import ArrayV2
-from zarr.v3.common import ZARRAY_JSON, ZATTRS_JSON, ZGROUP_JSON, make_cattr
+from zarr.v3.common import ZARRAY_JSON, ZATTRS_JSON, ZGROUP_JSON
 from zarr.v3.metadata import RuntimeConfiguration
 from zarr.v3.store import StoreLike, StorePath, make_store_path
 from zarr.v3.sync import sync
@@ -16,7 +15,7 @@ if TYPE_CHECKING:
     from zarr.v3.group import Group
 
 
-@frozen
+@dataclass(frozen=True)
 class GroupV2Metadata:
     zarr_format: Literal[2] = 2
 
@@ -25,10 +24,10 @@ class GroupV2Metadata:
 
     @classmethod
     def from_json(cls, zarr_json: Any) -> GroupV2Metadata:
-        return make_cattr().structure(zarr_json, cls)
+        return cls()
 
 
-@frozen
+@dataclass(frozen=True)
 class GroupV2:
     metadata: GroupV2Metadata
     store_path: StorePath
@@ -203,7 +202,7 @@ class GroupV2:
 
     async def update_attributes_async(self, new_attributes: Dict[str, Any]) -> GroupV2:
         await (self.store_path / ZATTRS_JSON).set_async(json.dumps(new_attributes).encode())
-        return evolve(self, attributes=new_attributes)
+        return replace(self, attributes=new_attributes)
 
     def update_attributes(self, new_attributes: Dict[str, Any]) -> GroupV2:
         return sync(

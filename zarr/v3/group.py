@@ -3,18 +3,18 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Literal, Optional, Union
 
-from attr import asdict, evolve, field, frozen
+from dataclasses import asdict, replace, field, dataclass
 
 from zarr.v3.array import Array
-from zarr.v3.common import ZARR_JSON, make_cattr
+from zarr.v3.common import JSON, ZARR_JSON
 from zarr.v3.metadata import RuntimeConfiguration
 from zarr.v3.store import StoreLike, StorePath, make_store_path
 from zarr.v3.sync import sync
 
 
-@frozen
+@dataclass(frozen=True)
 class GroupMetadata:
-    attributes: Dict[str, Any] = field(factory=dict)
+    attributes: Dict[str, Any] = field(default_factory=dict)
     zarr_format: Literal[3] = 3
     node_type: Literal["group"] = "group"
 
@@ -22,11 +22,11 @@ class GroupMetadata:
         return json.dumps(asdict(self)).encode()
 
     @classmethod
-    def from_json(cls, zarr_json: Any) -> GroupMetadata:
-        return make_cattr().structure(zarr_json, GroupMetadata)
+    def from_json(cls, zarr_json: JSON) -> GroupMetadata:
+        return cls(attributes=zarr_json.get("attributes", {}))
 
 
-@frozen
+@dataclass(frozen=True)
 class Group:
     metadata: GroupMetadata
     store_path: StorePath
@@ -163,11 +163,11 @@ class Group:
         )
 
     async def update_attributes_async(self, new_attributes: Dict[str, Any]) -> Group:
-        new_metadata = evolve(self.metadata, attributes=new_attributes)
+        new_metadata = replace(self.metadata, attributes=new_attributes)
 
         # Write new metadata
         await (self.store_path / ZARR_JSON).set_async(new_metadata.to_bytes())
-        return evolve(self, metadata=new_metadata)
+        return replace(self, metadata=new_metadata)
 
     def update_attributes(self, new_attributes: Dict[str, Any]) -> Group:
         return sync(

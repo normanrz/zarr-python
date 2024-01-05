@@ -11,40 +11,39 @@
 from __future__ import annotations
 
 from abc import abstractmethod, ABC
-from typing import TYPE_CHECKING, Optional, Type
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
-from zarr.v3.common import BytesLike, SliceSelection
+from zarr.v3.common import JSON, BytesLike, SliceSelection
 from zarr.v3.store import StorePath
 
 
 if TYPE_CHECKING:
-    from zarr.v3.metadata import CoreArrayMetadata, CodecMetadata
+    from zarr.v3.metadata import ChunkMetadata
 
 
 class Codec(ABC):
+    name: str
     is_fixed_size: bool
-    array_metadata: CoreArrayMetadata
+
+    def to_json(self) -> JSON:
+        return {"name": self.name}
+
+    @classmethod
+    def from_json(cls, val: JSON) -> Codec:
+        assert val["name"] == cls.name
+        return cls(**val.get("configuration", {}))
 
     @abstractmethod
     def compute_encoded_size(self, input_byte_length: int) -> int:
         pass
 
-    def resolve_metadata(self) -> CoreArrayMetadata:
-        return self.array_metadata
+    def resolve_metadata(self, chunk_metadata: ChunkMetadata) -> ChunkMetadata:
+        return chunk_metadata
 
-    @classmethod
-    @abstractmethod
-    def from_metadata(
-        cls, codec_metadata: "CodecMetadata", array_metadata: CoreArrayMetadata
-    ) -> Codec:
-        pass
-
-    @classmethod
-    @abstractmethod
-    def get_metadata_class(cls) -> "Type[CodecMetadata]":
-        pass
+    def validate_evolve(self, chunk_metadata: ChunkMetadata) -> Codec:
+        return self
 
 
 class ArrayArrayCodec(Codec):
@@ -52,6 +51,7 @@ class ArrayArrayCodec(Codec):
     async def decode(
         self,
         chunk_array: np.ndarray,
+        chunk_metadata: ChunkMetadata,
     ) -> np.ndarray:
         pass
 
@@ -59,6 +59,7 @@ class ArrayArrayCodec(Codec):
     async def encode(
         self,
         chunk_array: np.ndarray,
+        chunk_metadata: ChunkMetadata,
     ) -> Optional[np.ndarray]:
         pass
 
@@ -68,6 +69,7 @@ class ArrayBytesCodec(Codec):
     async def decode(
         self,
         chunk_array: BytesLike,
+        chunk_metadata: ChunkMetadata,
     ) -> np.ndarray:
         pass
 
@@ -75,6 +77,7 @@ class ArrayBytesCodec(Codec):
     async def encode(
         self,
         chunk_array: np.ndarray,
+        chunk_metadata: ChunkMetadata,
     ) -> Optional[BytesLike]:
         pass
 
@@ -85,6 +88,7 @@ class ArrayBytesCodecPartialDecodeMixin:
         self,
         store_path: StorePath,
         selection: SliceSelection,
+        chunk_metadata: ChunkMetadata,
     ) -> Optional[np.ndarray]:
         pass
 
@@ -96,6 +100,7 @@ class ArrayBytesCodecPartialEncodeMixin:
         store_path: StorePath,
         chunk_array: np.ndarray,
         selection: SliceSelection,
+        chunk_metadata: ChunkMetadata,
     ) -> None:
         pass
 
@@ -105,6 +110,7 @@ class BytesBytesCodec(Codec):
     async def decode(
         self,
         chunk_array: BytesLike,
+        chunk_metadata: ChunkMetadata,
     ) -> BytesLike:
         pass
 
@@ -112,5 +118,6 @@ class BytesBytesCodec(Codec):
     async def encode(
         self,
         chunk_array: BytesLike,
+        chunk_metadata: ChunkMetadata,
     ) -> Optional[BytesLike]:
         pass

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, replace
 import json
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
 
 import numcodecs
 import numpy as np
-from attr import evolve, frozen
 from numcodecs.compat import ensure_bytes, ensure_ndarray
 
 from zarr.v3.common import (
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from zarr.v3.array import Array
 
 
-@frozen
+@dataclass(frozen=True)
 class _AsyncArrayProxy:
     array: ArrayV2
 
@@ -36,7 +36,7 @@ class _AsyncArrayProxy:
         return _AsyncArraySelectionProxy(self.array, selection)
 
 
-@frozen
+@dataclass(frozen=True)
 class _AsyncArraySelectionProxy:
     array: ArrayV2
     selection: Selection
@@ -48,7 +48,7 @@ class _AsyncArraySelectionProxy:
         return await self.array.set_async(self.selection, value)
 
 
-@frozen
+@dataclass(frozen=True)
 class ArrayV2:
     metadata: ArrayV2Metadata
     attributes: Optional[Dict[str, Any]]
@@ -409,7 +409,7 @@ class ArrayV2:
 
     async def resize_async(self, new_shape: ChunkCoords) -> ArrayV2:
         assert len(new_shape) == len(self.metadata.shape)
-        new_metadata = evolve(self.metadata, shape=new_shape)
+        new_metadata = replace(self.metadata, shape=new_shape)
 
         # Remove all chunks outside of the new shape
         chunk_shape = self.metadata.chunks
@@ -429,7 +429,7 @@ class ArrayV2:
 
         # Write new metadata
         await (self.store_path / ZARRAY_JSON).set_async(new_metadata.to_bytes())
-        return evolve(self, metadata=new_metadata)
+        return replace(self, metadata=new_metadata)
 
     def resize(self, new_shape: ChunkCoords) -> ArrayV2:
         return sync(self.resize_async(new_shape), self.runtime_configuration.asyncio_loop)
@@ -441,20 +441,14 @@ class ArrayV2:
         from zarr.v3.common import ZARR_JSON
         from zarr.v3.metadata import (
             ArrayMetadata,
-            BloscCodecConfigurationMetadata,
-            BloscCodecMetadata,
-            BytesCodecConfigurationMetadata,
-            BytesCodecMetadata,
-            CodecMetadata,
+            BloscCodec,
+            BytesCodec,
+            Codec,
             DataType,
-            GzipCodecConfigurationMetadata,
-            GzipCodecMetadata,
-            RegularChunkGridConfigurationMetadata,
-            RegularChunkGridMetadata,
-            TransposeCodecConfigurationMetadata,
-            TransposeCodecMetadata,
-            V2ChunkKeyEncodingConfigurationMetadata,
-            V2ChunkKeyEncodingMetadata,
+            GzipCodec,
+            RegularChunkGrid,
+            TransposeCodec,
+            V2ChunkKeyEncoding,
             blosc_shuffle_int_to_str,
             dtype_to_data_type,
         )
@@ -472,15 +466,11 @@ class ArrayV2:
             self.metadata.filters is None or len(self.metadata.filters) == 0
         ), "Filters are not supported by v3."
 
-        codecs: List[CodecMetadata] = []
+        codecs: List[Codec] = []
 
         if self.metadata.order == "F":
-            codecs.append(
-                TransposeCodecMetadata(configuration=TransposeCodecConfigurationMetadata(order="F"))
-            )
-        codecs.append(
-            BytesCodecMetadata(configuration=BytesCodecConfigurationMetadata(endian=endian))
-        )
+            codecs.append(TransposeCodec(order="F"))  # TODO
+        codecs.append(BytesCodec(endian=endian))
 
         if self.metadata.compressor is not None:
             v2_codec = numcodecs.get_codec(self.metadata.compressor).get_config()
@@ -491,37 +481,23 @@ class ArrayV2:
             if v2_codec["id"] == "blosc":
                 shuffle = blosc_shuffle_int_to_str[v2_codec.get("shuffle", 0)]
                 codecs.append(
-                    BloscCodecMetadata(
-                        configuration=BloscCodecConfigurationMetadata(
-                            typesize=data_type.byte_count,
-                            cname=v2_codec["cname"],
-                            clevel=v2_codec["clevel"],
-                            shuffle=shuffle,
-                            blocksize=v2_codec.get("blocksize", 0),
-                        )
+                    BloscCodec(
+                        typesize=data_type.byte_count,
+                        cname=v2_codec["cname"],
+                        clevel=v2_codec["clevel"],
+                        shuffle=shuffle,
+                        blocksize=v2_codec.get("blocksize", 0),
                     )
                 )
             elif v2_codec["id"] == "gzip":
-                codecs.append(
-                    GzipCodecMetadata(
-                        configuration=GzipCodecConfigurationMetadata(level=v2_codec.get("level", 5))
-                    )
-                )
+                codecs.append(GzipCodec(level=v2_codec.get("level", 5)))
 
         new_metadata = ArrayMetadata(
             shape=self.metadata.shape,
-            chunk_grid=RegularChunkGridMetadata(
-                configuration=RegularChunkGridConfigurationMetadata(
-                    chunk_shape=self.metadata.chunks
-                )
-            ),
+            chunk_grid=RegularChunkGrid(chunk_shape=self.metadata.chunks),
             data_type=data_type,
             fill_value=0 if self.metadata.fill_value is None else self.metadata.fill_value,
-            chunk_key_encoding=V2ChunkKeyEncodingMetadata(
-                configuration=V2ChunkKeyEncodingConfigurationMetadata(
-                    separator=self.metadata.dimension_separator
-                )
-            ),
+            chunk_key_encoding=V2ChunkKeyEncoding(separator=self.metadata.dimension_separator),
             codecs=codecs,
             attributes=self.attributes or {},
         )
@@ -537,7 +513,7 @@ class ArrayV2:
 
     async def update_attributes_async(self, new_attributes: Dict[str, Any]) -> ArrayV2:
         await (self.store_path / ZATTRS_JSON).set_async(json.dumps(new_attributes).encode())
-        return evolve(self, attributes=new_attributes)
+        return replace(self, attributes=new_attributes)
 
     def update_attributes(self, new_attributes: Dict[str, Any]) -> ArrayV2:
         return sync(

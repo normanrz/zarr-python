@@ -4,56 +4,42 @@ from typing import (
     TYPE_CHECKING,
     Literal,
     Optional,
-    Type,
 )
 
 import numpy as np
-from attr import frozen, field
+from dataclasses import dataclass
 
 from zarr.v3.abc.codec import ArrayBytesCodec
 from zarr.v3.codecs.registry import register_codec
-from zarr.v3.common import BytesLike
-from zarr.v3.metadata import CodecMetadata
+from zarr.v3.common import JSON, BytesLike
 
 if TYPE_CHECKING:
-    from zarr.v3.metadata import CoreArrayMetadata
+    from zarr.v3.metadata import ChunkMetadata
 
 
-@frozen
-class BytesCodecConfigurationMetadata:
-    endian: Optional[Literal["big", "little"]] = "little"
+Endian = Literal["big", "little"]
 
 
-@frozen
-class BytesCodecMetadata:
-    configuration: BytesCodecConfigurationMetadata
-    name: Literal["bytes"] = field(default="bytes", init=False)
-
-
-@frozen
+@dataclass(frozen=True)
 class BytesCodec(ArrayBytesCodec):
-    array_metadata: CoreArrayMetadata
-    configuration: BytesCodecConfigurationMetadata
+    endian: Optional[Endian] = "little"
+
+    name: Literal["bytes"] = "bytes"
     is_fixed_size = True
 
-    @classmethod
-    def from_metadata(
-        cls, codec_metadata: CodecMetadata, array_metadata: CoreArrayMetadata
-    ) -> BytesCodec:
-        assert isinstance(codec_metadata, BytesCodecMetadata)
+    def to_json(self) -> JSON:
+        configuration_json = {}
+        if self.endian is not None:
+            configuration_json["endian"] = self.endian
+        return {**super().to_json(), "configuration": configuration_json}
+
+    def validate_evolve(self, chunk_metadata: ChunkMetadata) -> BytesCodec:
         assert (
-            array_metadata.dtype.itemsize == 1 or codec_metadata.configuration.endian is not None
+            chunk_metadata.dtype.itemsize == 1 or self.endian is not None
         ), "The `endian` configuration needs to be specified for multi-byte data types."
-        return cls(
-            array_metadata=array_metadata,
-            configuration=codec_metadata.configuration,
-        )
+        return self
 
-    @classmethod
-    def get_metadata_class(cls) -> Type[BytesCodecMetadata]:
-        return BytesCodecMetadata
-
-    def _get_byteorder(self, array: np.ndarray) -> Literal["big", "little"]:
+    def _get_byteorder(self, array: np.ndarray) -> Endian:
         if array.dtype.byteorder == "<":
             return "little"
         elif array.dtype.byteorder == ">":
@@ -66,32 +52,34 @@ class BytesCodec(ArrayBytesCodec):
     async def decode(
         self,
         chunk_bytes: BytesLike,
+        chunk_metadata: ChunkMetadata,
     ) -> np.ndarray:
-        if self.array_metadata.dtype.itemsize > 0:
-            if self.configuration.endian == "little":
+        if chunk_metadata.dtype.itemsize > 0:
+            if self.endian == "little":
                 prefix = "<"
             else:
                 prefix = ">"
-            dtype = np.dtype(f"{prefix}{self.array_metadata.data_type.to_numpy_shortname()}")
+            dtype = np.dtype(f"{prefix}{chunk_metadata.data_type.to_numpy_shortname()}")
         else:
-            dtype = np.dtype(f"|{self.array_metadata.data_type.to_numpy_shortname()}")
+            dtype = np.dtype(f"|{chunk_metadata.data_type.to_numpy_shortname()}")
         chunk_array = np.frombuffer(chunk_bytes, dtype)
 
         # ensure correct chunk shape
-        if chunk_array.shape != self.array_metadata.chunk_shape:
+        if chunk_array.shape != chunk_metadata.chunk_shape:
             chunk_array = chunk_array.reshape(
-                self.array_metadata.chunk_shape,
+                chunk_metadata.chunk_shape,
             )
         return chunk_array
 
     async def encode(
         self,
         chunk_array: np.ndarray,
+        _chunk_metadata: ChunkMetadata,
     ) -> Optional[BytesLike]:
         if chunk_array.dtype.itemsize > 1:
             byteorder = self._get_byteorder(chunk_array)
-            if self.configuration.endian != byteorder:
-                new_dtype = chunk_array.dtype.newbyteorder(self.configuration.endian)
+            if self.endian != byteorder:
+                new_dtype = chunk_array.dtype.newbyteorder(self.endian)
                 chunk_array = chunk_array.astype(new_dtype)
         return chunk_array.tobytes()
 

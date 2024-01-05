@@ -5,104 +5,84 @@ from typing import (
     Literal,
     Optional,
     Tuple,
-    Type,
 )
 
 import numpy as np
-from attr import frozen, field
+from dataclasses import dataclass, replace
 
 from zarr.v3.abc.codec import ArrayArrayCodec
 from zarr.v3.codecs.registry import register_codec
-from zarr.v3.metadata import CodecMetadata
+from zarr.v3.common import JSON
 
 if TYPE_CHECKING:
-    from zarr.v3.metadata import CoreArrayMetadata
+    from zarr.v3.metadata import ChunkMetadata
 
 
-@frozen
-class TransposeCodecConfigurationMetadata:
-    order: Tuple[int, ...]
-
-
-@frozen
-class TransposeCodecMetadata:
-    configuration: TransposeCodecConfigurationMetadata
-    name: Literal["transpose"] = field(default="transpose", init=False)
-
-
-@frozen
+@dataclass(frozen=True)
 class TransposeCodec(ArrayArrayCodec):
-    array_metadata: CoreArrayMetadata
     order: Tuple[int, ...]
+
+    name: Literal["transpose"] = "transpose"
     is_fixed_size = True
 
-    @classmethod
-    def from_metadata(
-        cls, codec_metadata: CodecMetadata, array_metadata: CoreArrayMetadata
-    ) -> TransposeCodec:
-        assert isinstance(codec_metadata, TransposeCodecMetadata)
-
-        configuration = codec_metadata.configuration
+    def validate_evolve(self, chunk_metadata: ChunkMetadata) -> TransposeCodec:
         # Compatibility with older version of ZEP1
-        if configuration.order == "F":  # type: ignore
-            order = tuple(array_metadata.ndim - x - 1 for x in range(array_metadata.ndim))
+        if self.order == "F":  # type: ignore
+            order = tuple(chunk_metadata.ndim - x - 1 for x in range(chunk_metadata.ndim))
 
-        elif configuration.order == "C":  # type: ignore
-            order = tuple(range(array_metadata.ndim))
+        elif self.order == "C":  # type: ignore
+            order = tuple(range(chunk_metadata.ndim))
 
         else:
-            assert len(configuration.order) == array_metadata.ndim, (
+            assert len(self.order) == chunk_metadata.ndim, (
                 "The `order` tuple needs have as many entries as "
-                + f"there are dimensions in the array. Got: {configuration.order}"
+                + f"there are dimensions in the array. Got: {self.order}"
             )
-            assert len(configuration.order) == len(set(configuration.order)), (
-                "There must not be duplicates in the `order` tuple. "
-                + f"Got: {configuration.order}"
+            assert len(self.order) == len(set(self.order)), (
+                "There must not be duplicates in the `order` tuple. " + f"Got: {self.order}"
             )
-            assert all(0 <= x < array_metadata.ndim for x in configuration.order), (
+            assert all(0 <= x < chunk_metadata.ndim for x in self.order), (
                 "All entries in the `order` tuple must be between 0 and "
-                + f"the number of dimensions in the array. Got: {configuration.order}"
+                + f"the number of dimensions in the array. Got: {self.order}"
             )
-            order = tuple(configuration.order)
+            order = tuple(self.order)
 
-        return cls(
-            array_metadata=array_metadata,
-            order=order,
-        )
+        if order != self.order:
+            return replace(self, order=order)
+        return self
+
+    def to_json(self) -> JSON:
+        return {**super().to_json(), "configuration": {"order": self.order}}
 
     @classmethod
-    def get_metadata_class(cls) -> Type[TransposeCodecMetadata]:
-        return TransposeCodecMetadata
+    def from_json(cls, val: JSON) -> TransposeCodec:
+        assert val["name"] == cls.name
+        order = val["configuration"]["order"]
+        if isinstance(order, list):
+            order = tuple(order)
+        return cls(order=order)
 
-    def resolve_metadata(self) -> CoreArrayMetadata:
-        from zarr.v3.metadata import CoreArrayMetadata
+    def resolve_metadata(self, chunk_metadata: ChunkMetadata) -> ChunkMetadata:
+        from zarr.v3.metadata import ChunkMetadata
 
-        return CoreArrayMetadata(
-            shape=tuple(
-                self.array_metadata.shape[self.order[i]] for i in range(self.array_metadata.ndim)
-            ),
+        return ChunkMetadata(
             chunk_shape=tuple(
-                self.array_metadata.chunk_shape[self.order[i]]
-                for i in range(self.array_metadata.ndim)
+                chunk_metadata.chunk_shape[self.order[i]] for i in range(chunk_metadata.ndim)
             ),
-            data_type=self.array_metadata.data_type,
-            fill_value=self.array_metadata.fill_value,
-            runtime_configuration=self.array_metadata.runtime_configuration,
+            data_type=chunk_metadata.data_type,
+            fill_value=chunk_metadata.fill_value,
+            runtime_configuration=chunk_metadata.runtime_configuration,
         )
 
-    async def decode(
-        self,
-        chunk_array: np.ndarray,
-    ) -> np.ndarray:
-        inverse_order = [0 for _ in range(self.array_metadata.ndim)]
+    async def decode(self, chunk_array: np.ndarray, chunk_metadata: ChunkMetadata) -> np.ndarray:
+        inverse_order = [0 for _ in range(chunk_metadata.ndim)]
         for x, i in enumerate(self.order):
             inverse_order[x] = i
         chunk_array = chunk_array.transpose(inverse_order)
         return chunk_array
 
     async def encode(
-        self,
-        chunk_array: np.ndarray,
+        self, chunk_array: np.ndarray, chunk_metadata: ChunkMetadata
     ) -> Optional[np.ndarray]:
         chunk_array = chunk_array.transpose(self.order)
         return chunk_array

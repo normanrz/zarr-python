@@ -1,4 +1,5 @@
 from __future__ import annotations
+from dataclasses import dataclass
 
 from functools import reduce
 from typing import (
@@ -13,45 +14,41 @@ from typing import (
 from warnings import warn
 
 import numpy as np
-from attr import frozen
 
 from zarr.v3.abc.codec import Codec, ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec
 from zarr.v3.common import BytesLike
-from zarr.v3.metadata import CodecMetadata, ShardingCodecIndexLocation
-from zarr.v3.codecs.registry import get_codec_class
+from zarr.v3.metadata import ShardingCodecIndexLocation
 
 if TYPE_CHECKING:
-    from zarr.v3.metadata import CoreArrayMetadata
-    from zarr.v3.codecs.sharding import ShardingCodecMetadata
-    from zarr.v3.codecs.blosc import BloscCodecMetadata
-    from zarr.v3.codecs.bytes import BytesCodecMetadata
-    from zarr.v3.codecs.transpose import TransposeCodecMetadata
-    from zarr.v3.codecs.gzip import GzipCodecMetadata
-    from zarr.v3.codecs.zstd import ZstdCodecMetadata
-    from zarr.v3.codecs.crc32c_ import Crc32cCodecMetadata
+    from zarr.v3.metadata import ChunkMetadata
+    from zarr.v3.codecs.sharding import ShardingCodec
+    from zarr.v3.codecs.blosc import BloscCodec
+    from zarr.v3.codecs.bytes import BytesCodec
+    from zarr.v3.codecs.transpose import TransposeCodec
+    from zarr.v3.codecs.gzip import GzipCodec
+    from zarr.v3.codecs.zstd import ZstdCodec
+    from zarr.v3.codecs.crc32c_ import Crc32cCodec
 
 
-@frozen
+@dataclass(frozen=True)
 class CodecPipeline:
     codecs: List[Codec]
 
     @classmethod
-    def from_metadata(
+    def create(
         cls,
-        codecs_metadata: Iterable[CodecMetadata],
-        array_metadata: CoreArrayMetadata,
+        codecs: Iterable[Codec],
     ) -> CodecPipeline:
         out: List[Codec] = []
-        for codec_metadata in codecs_metadata or []:
-            codec_cls = get_codec_class(codec_metadata.name)
-            codec = codec_cls.from_metadata(codec_metadata, array_metadata)
+        for codec in codecs or []:
+            # codec = codec.validate_evolve(chunk_metadata)
             out.append(codec)
-            array_metadata = codec.resolve_metadata()
-        CodecPipeline._validate_codecs(out, array_metadata)
+            # chunk_metadata = codec.resolve_metadata(chunk_metadata)
+        # CodecPipeline._validate_codecs(out, chunk_metadata)
         return cls(out)
 
     @staticmethod
-    def _validate_codecs(codecs: List[Codec], array_metadata: CoreArrayMetadata) -> None:
+    def _validate_codecs(codecs: List[Codec], chunk_metadata: ChunkMetadata) -> None:
         from zarr.v3.codecs.sharding import ShardingCodec
 
         assert any(
@@ -88,15 +85,15 @@ class CodecPipeline:
                 )
 
             if isinstance(codec, ShardingCodec):
-                assert len(codec.configuration.chunk_shape) == len(array_metadata.shape), (
+                assert len(codec.chunk_shape) == len(chunk_metadata.shape), (
                     "The shard's `chunk_shape` and array's `shape` need to have the "
                     + "same number of dimensions."
                 )
                 assert all(
                     s % c == 0
                     for s, c in zip(
-                        array_metadata.chunk_shape,
-                        codec.configuration.chunk_shape,
+                        chunk_metadata.chunk_shape,
+                        codec.chunk_shape,
                     )
                 ), (
                     "The array's `chunk_shape` needs to be divisible by the "
@@ -119,31 +116,38 @@ class CodecPipeline:
     def _bytes_bytes_codecs(self) -> List[BytesBytesCodec]:
         return [codec for codec in self.codecs if isinstance(codec, BytesBytesCodec)]
 
-    async def decode(self, chunk_bytes: BytesLike) -> np.ndarray:
+    async def decode(self, chunk_bytes: BytesLike, chunk_metadata: ChunkMetadata) -> np.ndarray:
+        # TODO: resolve metadata in reverse order
         for bb_codec in self._bytes_bytes_codecs()[::-1]:
-            chunk_bytes = await bb_codec.decode(chunk_bytes)
+            chunk_bytes = await bb_codec.decode(chunk_bytes, chunk_metadata)
 
-        chunk_array = await self._array_bytes_codec().decode(chunk_bytes)
+        chunk_array = await self._array_bytes_codec().decode(chunk_bytes, chunk_metadata)
 
         for aa_codec in self._array_array_codecs()[::-1]:
-            chunk_array = await aa_codec.decode(chunk_array)
+            chunk_array = await aa_codec.decode(chunk_array, chunk_metadata)
 
         return chunk_array
 
-    async def encode(self, chunk_array: np.ndarray) -> Optional[BytesLike]:
+    async def encode(
+        self, chunk_array: np.ndarray, chunk_metadata: ChunkMetadata
+    ) -> Optional[BytesLike]:
         for aa_codec in self._array_array_codecs():
-            chunk_array_maybe = await aa_codec.encode(chunk_array)
+            chunk_array_maybe = await aa_codec.encode(chunk_array, chunk_metadata)
+            chunk_metadata = aa_codec.resolve_metadata(chunk_metadata)
             if chunk_array_maybe is None:
                 return None
             chunk_array = chunk_array_maybe
 
-        chunk_bytes_maybe = await self._array_bytes_codec().encode(chunk_array)
+        ab_codec = self._array_bytes_codec()
+        chunk_bytes_maybe = await ab_codec.encode(chunk_array, chunk_metadata)
+        chunk_metadata = ab_codec.resolve_metadata(chunk_metadata)
         if chunk_bytes_maybe is None:
             return None
         chunk_bytes = chunk_bytes_maybe
 
         for bb_codec in self._bytes_bytes_codecs():
-            chunk_bytes_maybe = await bb_codec.encode(chunk_bytes)
+            chunk_bytes_maybe = await bb_codec.encode(chunk_bytes, chunk_metadata)
+            chunk_metadata = bb_codec.resolve_metadata(chunk_metadata)
             if chunk_bytes_maybe is None:
                 return None
             chunk_bytes = chunk_bytes_maybe
@@ -160,30 +164,28 @@ def blosc_codec(
     clevel: int = 5,
     shuffle: Literal["noshuffle", "shuffle", "bitshuffle"] = "noshuffle",
     blocksize: int = 0,
-) -> "BloscCodecMetadata":
-    from zarr.v3.codecs.blosc import BloscCodecMetadata, BloscCodecConfigurationMetadata
+) -> "BloscCodec":
+    from zarr.v3.codecs.blosc import BloscCodec
 
-    return BloscCodecMetadata(
-        configuration=BloscCodecConfigurationMetadata(
-            cname=cname,
-            clevel=clevel,
-            shuffle=shuffle,
-            blocksize=blocksize,
-            typesize=typesize,
-        )
+    return BloscCodec(
+        cname=cname,
+        clevel=clevel,
+        shuffle=shuffle,
+        blocksize=blocksize,
+        typesize=typesize,
     )
 
 
-def bytes_codec(endian: Optional[Literal["big", "little"]] = "little") -> "BytesCodecMetadata":
-    from zarr.v3.codecs.bytes import BytesCodecMetadata, BytesCodecConfigurationMetadata
+def bytes_codec(endian: Optional[Literal["big", "little"]] = "little") -> "BytesCodec":
+    from zarr.v3.codecs.bytes import BytesCodec
 
-    return BytesCodecMetadata(configuration=BytesCodecConfigurationMetadata(endian))
+    return BytesCodec(endian=endian)
 
 
 def transpose_codec(
     order: Union[Tuple[int, ...], Literal["C", "F"]], ndim: Optional[int] = None
-) -> "TransposeCodecMetadata":
-    from zarr.v3.codecs.transpose import TransposeCodecMetadata, TransposeCodecConfigurationMetadata
+) -> "TransposeCodec":
+    from zarr.v3.codecs.transpose import TransposeCodec
 
     if order == "C" or order == "F":
         assert (
@@ -194,39 +196,40 @@ def transpose_codec(
         if order == "F":
             order = tuple(ndim - i - 1 for i in range(ndim))
 
-    return TransposeCodecMetadata(configuration=TransposeCodecConfigurationMetadata(order))
+    return TransposeCodec(order=order)
 
 
-def gzip_codec(level: int = 5) -> "GzipCodecMetadata":
-    from zarr.v3.codecs.gzip import GzipCodecMetadata, GzipCodecConfigurationMetadata
+def gzip_codec(level: int = 5) -> "GzipCodec":
+    from zarr.v3.codecs.gzip import GzipCodec
 
-    return GzipCodecMetadata(configuration=GzipCodecConfigurationMetadata(level))
-
-
-def zstd_codec(level: int = 0, checksum: bool = False) -> "ZstdCodecMetadata":
-    from zarr.v3.codecs.zstd import ZstdCodecMetadata, ZstdCodecConfigurationMetadata
-
-    return ZstdCodecMetadata(configuration=ZstdCodecConfigurationMetadata(level, checksum))
+    return GzipCodec(level=level)
 
 
-def crc32c_codec() -> "Crc32cCodecMetadata":
-    from zarr.v3.codecs.crc32c_ import Crc32cCodecMetadata
+def zstd_codec(level: int = 0, checksum: bool = False) -> "ZstdCodec":
+    from zarr.v3.codecs.zstd import ZstdCodec
 
-    return Crc32cCodecMetadata()
+    return ZstdCodec(level=level, checksum=checksum)
+
+
+def crc32c_codec() -> "Crc32cCodec":
+    from zarr.v3.codecs.crc32c_ import Crc32cCodec
+
+    return Crc32cCodec()
 
 
 def sharding_codec(
     chunk_shape: Tuple[int, ...],
-    codecs: Optional[List[CodecMetadata]] = None,
-    index_codecs: Optional[List[CodecMetadata]] = None,
+    codecs: Optional[List[Codec]] = None,
+    index_codecs: Optional[List[Codec]] = None,
     index_location: ShardingCodecIndexLocation = ShardingCodecIndexLocation.end,
-) -> "ShardingCodecMetadata":
-    from zarr.v3.codecs.sharding import ShardingCodecMetadata, ShardingCodecConfigurationMetadata
+) -> "ShardingCodec":
+    from zarr.v3.codecs.sharding import ShardingCodec
 
     codecs = codecs or [bytes_codec()]
     index_codecs = index_codecs or [bytes_codec(), crc32c_codec()]
-    return ShardingCodecMetadata(
-        configuration=ShardingCodecConfigurationMetadata(
-            chunk_shape, codecs, index_codecs, index_location
-        )
+    return ShardingCodec(
+        chunk_shape=chunk_shape,
+        codecs=codecs,
+        index_codecs=index_codecs,
+        index_location=index_location,
     )

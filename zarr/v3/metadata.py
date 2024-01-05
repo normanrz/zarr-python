@@ -1,17 +1,18 @@
 from __future__ import annotations
+from dataclasses import asdict, dataclass, field
 
 import json
 from asyncio import AbstractEventLoop
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Protocol, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
-from attr import asdict, field, frozen
+from zarr.v3.abc.codec import Codec
 
-from zarr.v3.common import ChunkCoords, make_cattr
+from zarr.v3.common import JSON, ChunkCoords
 
 
-@frozen
+@dataclass(frozen=True)
 class RuntimeConfiguration:
     order: Literal["C", "F"] = "C"
     concurrency: Optional[int] = None
@@ -70,6 +71,14 @@ class DataType(Enum):
         }
         return data_type_to_numpy[self]
 
+    def to_json(self) -> JSON:
+        return self.name
+
+    @classmethod
+    def from_json(cls, val: JSON) -> DataType:
+        assert isinstance(val, str)
+        return cls[val]
+
 
 dtype_to_data_type = {
     "|b1": "bool",
@@ -87,65 +96,92 @@ dtype_to_data_type = {
 }
 
 
-@frozen
-class RegularChunkGridConfigurationMetadata:
+@dataclass(frozen=True)
+class _ExtensionPoint:
+    @property
+    def name(self) -> str:
+        raise NotImplementedError
+
+    def to_json(self) -> JSON:
+        return {"name": self.name, "configuration": asdict(self)}
+
+    @classmethod
+    def from_json(cls, val: JSON) -> _ExtensionPoint:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class ChunkGrid(_ExtensionPoint):
+    @classmethod
+    def from_json(cls, val: JSON) -> ChunkGrid:
+        assert isinstance(val, dict)
+        name = val["name"]
+        if name == "regular":
+            return RegularChunkGrid(chunk_shape=tuple(val["configuration"]["chunk_shape"]))
+        else:
+            raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class RegularChunkGrid(ChunkGrid):
     chunk_shape: ChunkCoords
 
-
-@frozen
-class RegularChunkGridMetadata:
-    configuration: RegularChunkGridConfigurationMetadata
-    name: Literal["regular"] = "regular"
+    @property
+    def name(self) -> Literal["regular"]:
+        return "regular"
 
 
-@frozen
-class DefaultChunkKeyEncodingConfigurationMetadata:
+@dataclass(frozen=True)
+class ChunkKeyEncoding(_ExtensionPoint):
+    @classmethod
+    def from_json(cls, val: JSON) -> ChunkKeyEncoding:
+        assert isinstance(val, dict)
+        name = val["name"]
+        if name == "default":
+            return DefaultChunkKeyEncoding(**val["configuration"])
+        elif name == "v2":
+            return V2ChunkKeyEncoding(**val["configuration"])
+        else:
+            raise NotImplementedError
+
+    def decode_chunk_key(self, chunk_key: str) -> ChunkCoords:
+        raise NotImplementedError
+
+    def encode_chunk_key(self, chunk_coords: ChunkCoords) -> str:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class DefaultChunkKeyEncoding(ChunkKeyEncoding):
     separator: Literal[".", "/"] = "/"
 
-
-@frozen
-class DefaultChunkKeyEncodingMetadata:
-    configuration: DefaultChunkKeyEncodingConfigurationMetadata = (
-        DefaultChunkKeyEncodingConfigurationMetadata()
-    )
-    name: Literal["default"] = "default"
+    @property
+    def name(self) -> Literal["default"]:
+        return "default"
 
     def decode_chunk_key(self, chunk_key: str) -> ChunkCoords:
         if chunk_key == "c":
             return ()
-        return tuple(map(int, chunk_key[1:].split(self.configuration.separator)))
+        return tuple(map(int, chunk_key[1:].split(self.separator)))
 
     def encode_chunk_key(self, chunk_coords: ChunkCoords) -> str:
-        return self.configuration.separator.join(map(str, ("c",) + chunk_coords))
+        return self.separator.join(map(str, ("c",) + chunk_coords))
 
 
-@frozen
-class V2ChunkKeyEncodingConfigurationMetadata:
+@dataclass(frozen=True)
+class V2ChunkKeyEncoding(ChunkKeyEncoding):
     separator: Literal[".", "/"] = "."
 
-
-@frozen
-class V2ChunkKeyEncodingMetadata:
-    configuration: V2ChunkKeyEncodingConfigurationMetadata = (
-        V2ChunkKeyEncodingConfigurationMetadata()
-    )
-    name: Literal["v2"] = "v2"
+    @property
+    def name(self) -> Literal["v2"]:
+        return "v2"
 
     def decode_chunk_key(self, chunk_key: str) -> ChunkCoords:
-        return tuple(map(int, chunk_key.split(self.configuration.separator)))
+        return tuple(map(int, chunk_key.split(self.separator)))
 
     def encode_chunk_key(self, chunk_coords: ChunkCoords) -> str:
-        chunk_identifier = self.configuration.separator.join(map(str, chunk_coords))
+        chunk_identifier = self.separator.join(map(str, chunk_coords))
         return "0" if chunk_identifier == "" else chunk_identifier
-
-
-ChunkKeyEncodingMetadata = Union[DefaultChunkKeyEncodingMetadata, V2ChunkKeyEncodingMetadata]
-
-
-class CodecMetadata(Protocol):
-    @property
-    def name(self) -> str:
-        pass
 
 
 class ShardingCodecIndexLocation(Enum):
@@ -153,13 +189,12 @@ class ShardingCodecIndexLocation(Enum):
     end = "end"
 
 
-@frozen
-class CoreArrayMetadata:
-    shape: ChunkCoords
+@dataclass(frozen=True)
+class ChunkMetadata:
     chunk_shape: ChunkCoords
     data_type: DataType
     fill_value: Any
-    runtime_configuration: RuntimeConfiguration
+    runtime_configuration: RuntimeConfiguration = runtime_configuration("C")
 
     @property
     def dtype(self) -> np.dtype:
@@ -167,18 +202,18 @@ class CoreArrayMetadata:
 
     @property
     def ndim(self) -> int:
-        return len(self.shape)
+        return len(self.chunk_shape)
 
 
-@frozen
+@dataclass(frozen=True)
 class ArrayMetadata:
     shape: ChunkCoords
     data_type: DataType
-    chunk_grid: RegularChunkGridMetadata
-    chunk_key_encoding: ChunkKeyEncodingMetadata
+    chunk_grid: ChunkGrid
+    chunk_key_encoding: ChunkKeyEncoding
     fill_value: Any
-    codecs: List[CodecMetadata]
-    attributes: Dict[str, Any] = field(factory=dict)
+    codecs: List[Codec]
+    attributes: Dict[str, JSON] = field(default_factory=dict)
     dimension_names: Optional[Tuple[str, ...]] = None
     zarr_format: Literal[3] = 3
     node_type: Literal["array"] = "array"
@@ -191,35 +226,73 @@ class ArrayMetadata:
     def ndim(self) -> int:
         return len(self.shape)
 
-    def get_core_metadata(self, runtime_configuration: RuntimeConfiguration) -> CoreArrayMetadata:
-        return CoreArrayMetadata(
-            shape=self.shape,
-            chunk_shape=self.chunk_grid.configuration.chunk_shape,
+    def get_chunk_metadata(
+        self, _chunk_coords: ChunkCoords, runtime_configuration: RuntimeConfiguration
+    ) -> ChunkMetadata:
+        assert isinstance(
+            self.chunk_grid, RegularChunkGrid
+        ), "Currently, only regular chunk grid is supported"
+        return ChunkMetadata(
+            chunk_shape=self.chunk_grid.chunk_shape,
             data_type=self.data_type,
             fill_value=self.fill_value,
             runtime_configuration=runtime_configuration,
         )
 
-    def to_bytes(self) -> bytes:
-        def _json_convert(o):
-            if isinstance(o, Enum):
-                return o.name
-            raise TypeError
+    def to_json(self) -> JSON:
+        json = {
+            "zarr_format": self.zarr_format,
+            "node_type": self.node_type,
+            "shape": self.shape,
+            "data_type": self.data_type.name,
+            "chunk_grid": self.chunk_grid.to_json(),
+            "chunk_key_encoding": self.chunk_key_encoding.to_json(),
+            "fill_value": self.fill_value,
+            "codecs": [codec.to_json() for codec in self.codecs],
+            "attributes": self.attributes,
+        }
 
-        return json.dumps(
-            asdict(
-                self,
-                filter=lambda attr, value: attr.name != "dimension_names" or value is not None,
-            ),
-            default=_json_convert,
-        ).encode()
+        if self.dimension_names is not None:
+            json["dimension_names"] = self.dimension_names
+
+        return json
+
+    def to_bytes(self) -> bytes:
+        return json.dumps(self.to_json()).encode()
 
     @classmethod
     def from_json(cls, zarr_json: Any) -> ArrayMetadata:
-        return make_cattr().structure(zarr_json, cls)
+        from zarr.v3.codecs.registry import from_json
+
+        return ArrayMetadata(
+            shape=tuple(zarr_json["shape"]),
+            data_type=DataType.from_json(zarr_json["data_type"]),
+            chunk_grid=ChunkGrid.from_json(zarr_json["chunk_grid"]),
+            chunk_key_encoding=ChunkKeyEncoding.from_json(zarr_json["chunk_key_encoding"]),
+            fill_value=zarr_json["fill_value"],
+            codecs=[from_json(codec_json) for codec_json in zarr_json.get("codecs", [])],
+            attributes=zarr_json["attributes"],
+            dimension_names=tuple(zarr_json["dimension_names"])
+            if "dimension_names" in zarr_json
+            else None,
+        )
 
 
-@frozen
+def _parse_v2_fill_value(val: JSON) -> Union[None, int, float]:
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except ValueError:
+        pass
+    try:
+        return float(val)
+    except ValueError:
+        pass
+    raise ValueError
+
+
+@dataclass(frozen=True)
 class ArrayV2Metadata:
     shape: ChunkCoords
     chunks: ChunkCoords
@@ -235,17 +308,26 @@ class ArrayV2Metadata:
     def ndim(self) -> int:
         return len(self.shape)
 
-    def to_bytes(self) -> bytes:
-        def _json_convert(o):
-            if isinstance(o, np.dtype):
-                if o.fields is None:
-                    return o.str
-                else:
-                    return o.descr
-            raise TypeError
+    def to_json(self) -> JSON:
+        json = asdict(self)
+        if self.dtype.fields is None:
+            json["dtype"] = self.dtype.str
+        else:
+            json["dtype"] = self.dtype.descr
+        return json
 
-        return json.dumps(asdict(self), default=_json_convert).encode()
+    def to_bytes(self) -> bytes:
+        return json.dumps(self.to_json()).encode()
 
     @classmethod
     def from_json(cls, zarr_json: Any) -> ArrayV2Metadata:
-        return make_cattr().structure(zarr_json, cls)
+        return ArrayV2Metadata(
+            shape=tuple(json["shape"]),
+            chunks=tuple(json["chunks"]),
+            dtype=np.dtype(json["dtype"]),
+            fill_value=_parse_v2_fill_value(json.get("fill_value")),
+            order=json.get("order", "C"),
+            filters=json.get("filters"),
+            dimension_separator=json.get("dimension_separator", "."),
+            compressor=json.get("compressor"),
+        )

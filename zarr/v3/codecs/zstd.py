@@ -1,75 +1,46 @@
 from __future__ import annotations
 
 from typing import (
-    TYPE_CHECKING,
     Literal,
     Optional,
-    Type,
 )
 
-from attr import frozen, field
+from dataclasses import dataclass
 from zstandard import ZstdCompressor, ZstdDecompressor
 
 from zarr.v3.abc.codec import BytesBytesCodec
 from zarr.v3.codecs.registry import register_codec
-from zarr.v3.common import BytesLike, to_thread
-from zarr.v3.metadata import CodecMetadata
-
-if TYPE_CHECKING:
-    from zarr.v3.metadata import CoreArrayMetadata
+from zarr.v3.common import JSON, BytesLike, to_thread
+from zarr.v3.metadata import ChunkMetadata
 
 
-@frozen
-class ZstdCodecConfigurationMetadata:
+@dataclass(frozen=True)
+class ZstdCodec(BytesBytesCodec):
     level: int = 0
     checksum: bool = False
 
-
-@frozen
-class ZstdCodecMetadata:
-    configuration: ZstdCodecConfigurationMetadata
-    name: Literal["zstd"] = field(default="zstd", init=False)
-
-
-@frozen
-class ZstdCodec(BytesBytesCodec):
-    array_metadata: CoreArrayMetadata
-    configuration: ZstdCodecConfigurationMetadata
+    name: Literal["zstd"] = "zstd"
     is_fixed_size = True
 
-    @classmethod
-    def from_metadata(
-        cls, codec_metadata: CodecMetadata, array_metadata: CoreArrayMetadata
-    ) -> ZstdCodec:
-        assert isinstance(codec_metadata, ZstdCodecMetadata)
-        return cls(
-            array_metadata=array_metadata,
-            configuration=codec_metadata.configuration,
-        )
-
-    @classmethod
-    def get_metadata_class(cls) -> Type[ZstdCodecMetadata]:
-        return ZstdCodecMetadata
+    def to_json(self) -> JSON:
+        return {
+            **super().to_json(),
+            "configuration": {"level": self.level, "checksum": self.checksum},
+        }
 
     def _compress(self, data: bytes) -> bytes:
-        ctx = ZstdCompressor(
-            level=self.configuration.level, write_checksum=self.configuration.checksum
-        )
+        ctx = ZstdCompressor(level=self.level, write_checksum=self.checksum)
         return ctx.compress(data)
 
     def _decompress(self, data: bytes) -> bytes:
         ctx = ZstdDecompressor()
         return ctx.decompress(data)
 
-    async def decode(
-        self,
-        chunk_bytes: bytes,
-    ) -> BytesLike:
+    async def decode(self, chunk_bytes: bytes, _chunk_metadata: ChunkMetadata) -> BytesLike:
         return await to_thread(self._decompress, chunk_bytes)
 
     async def encode(
-        self,
-        chunk_bytes: bytes,
+        self, chunk_bytes: bytes, _chunk_metadata: ChunkMetadata
     ) -> Optional[BytesLike]:
         return await to_thread(self._compress, chunk_bytes)
 
