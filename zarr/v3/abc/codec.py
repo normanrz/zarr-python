@@ -20,7 +20,7 @@ from zarr.v3.store import StorePath
 
 
 if TYPE_CHECKING:
-    from zarr.v3.metadata import ChunkMetadata
+    from zarr.v3.metadata import ArrayMetadata, ChunkMetadata, DataType
 
 
 class Codec(ABC):
@@ -42,8 +42,11 @@ class Codec(ABC):
     def resolve_metadata(self, chunk_metadata: ChunkMetadata) -> ChunkMetadata:
         return chunk_metadata
 
-    def validate_evolve(self, chunk_metadata: ChunkMetadata) -> Codec:
+    def evolve(self, *, ndim: int, data_type: DataType) -> Codec:
         return self
+
+    def validate(self, array_metadata: ArrayMetadata) -> None:
+        pass
 
 
 class ArrayArrayCodec(Codec):

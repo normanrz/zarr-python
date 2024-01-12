@@ -55,6 +55,10 @@ class DataType(Enum):
         }
         return data_type_byte_counts[self]
 
+    @property
+    def has_endianness(self) -> bool:
+        return self.byte_count != 1
+
     def to_numpy_shortname(self) -> str:
         data_type_to_numpy = {
             DataType.bool: "bool",

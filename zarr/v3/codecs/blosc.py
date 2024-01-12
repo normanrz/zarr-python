@@ -18,7 +18,7 @@ from zarr.v3.codecs.registry import register_codec
 from zarr.v3.common import JSON, BytesLike, to_thread
 
 if TYPE_CHECKING:
-    from zarr.v3.metadata import ChunkMetadata
+    from zarr.v3.metadata import ChunkMetadata, DataType
 
 
 BloscCNames = Literal["lz4", "lz4hc", "blosclz", "zstd", "snappy", "zlib"]
@@ -58,10 +58,10 @@ class BloscCodec(BytesBytesCodec):
             },
         }
 
-    def validate_evolve(self, chunk_metadata: ChunkMetadata) -> BloscCodec:
+    def evolve(self, *, data_type: DataType, **_kwargs) -> BloscCodec:
         new_codec = self
         if new_codec.typesize == 0:
-            new_codec = replace(new_codec, typesize=chunk_metadata.data_type.byte_count)
+            new_codec = replace(new_codec, typesize=data_type.byte_count)
 
         return new_codec
 

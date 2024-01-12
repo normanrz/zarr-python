@@ -25,23 +25,23 @@ class TransposeCodec(ArrayArrayCodec):
     name: Literal["transpose"] = "transpose"
     is_fixed_size = True
 
-    def validate_evolve(self, chunk_metadata: ChunkMetadata) -> TransposeCodec:
+    def evolve(self, *, ndim: int, **_kwargs) -> TransposeCodec:
         # Compatibility with older version of ZEP1
         if self.order == "F":  # type: ignore
-            order = tuple(chunk_metadata.ndim - x - 1 for x in range(chunk_metadata.ndim))
+            order = tuple(ndim - x - 1 for x in range(ndim))
 
         elif self.order == "C":  # type: ignore
-            order = tuple(range(chunk_metadata.ndim))
+            order = tuple(range(ndim))
 
         else:
-            assert len(self.order) == chunk_metadata.ndim, (
+            assert len(self.order) == ndim, (
                 "The `order` tuple needs have as many entries as "
                 + f"there are dimensions in the array. Got: {self.order}"
             )
             assert len(self.order) == len(set(self.order)), (
                 "There must not be duplicates in the `order` tuple. " + f"Got: {self.order}"
             )
-            assert all(0 <= x < chunk_metadata.ndim for x in self.order), (
+            assert all(0 <= x < ndim for x in self.order), (
                 "All entries in the `order` tuple must be between 0 and "
                 + f"the number of dimensions in the array. Got: {self.order}"
             )

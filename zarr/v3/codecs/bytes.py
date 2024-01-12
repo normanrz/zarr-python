@@ -14,7 +14,7 @@ from zarr.v3.codecs.registry import register_codec
 from zarr.v3.common import JSON, BytesLike
 
 if TYPE_CHECKING:
-    from zarr.v3.metadata import ChunkMetadata
+    from zarr.v3.metadata import ChunkMetadata, ArrayMetadata
 
 
 Endian = Literal["big", "little"]
@@ -33,11 +33,10 @@ class BytesCodec(ArrayBytesCodec):
             configuration_json["endian"] = self.endian
         return {**super().to_json(), "configuration": configuration_json}
 
-    def validate_evolve(self, chunk_metadata: ChunkMetadata) -> BytesCodec:
+    def validate(self, array_metadata: ArrayMetadata) -> None:
         assert (
-            chunk_metadata.dtype.itemsize == 1 or self.endian is not None
+            not array_metadata.data_type.has_endianness or self.endian is not None
         ), "The `endian` configuration needs to be specified for multi-byte data types."
-        return self
 
     def _get_byteorder(self, array: np.ndarray) -> Endian:
         if array.dtype.byteorder == "<":

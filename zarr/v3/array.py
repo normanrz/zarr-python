@@ -83,6 +83,7 @@ class AsyncArray(AsynchronousArray):
         )
 
         codecs = list(codecs) if codecs is not None else [bytes_codec()]
+        codecs = [codec.evolve(ndim=len(shape), data_type=data_type) for codec in codecs]
 
         if fill_value is None:
             if data_type == DataType.bool:
@@ -228,6 +229,7 @@ class AsyncArray(AsynchronousArray):
             self.metadata.dimension_names
         ), "`dimension_names` and `shape` need to have the same number of dimensions."
         assert self.metadata.fill_value is not None, "`fill_value` is required."
+        self.codec_pipeline.validate(self.metadata)
 
     async def _read_chunk(
         self,
